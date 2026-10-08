@@ -1,0 +1,2 @@
+# Pure Python 3 standard library
+# Zero external dependencies required

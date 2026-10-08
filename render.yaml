@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: platform-moderator-bot
+    env: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: "echo 'Build successful'"
+    startCommand: "python3 bot.py"
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: TELEGRAM_BOT_TOKEN
+        value: 8840394969:AAFXsybR9ihgyRqBKe00r8eeILxl-G1mwc4
