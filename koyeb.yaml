@@ -1,0 +1,17 @@
+name: platform-moderator-bot
+services:
+  - name: platform-moderator-bot
+    type: web
+    regions:
+      - fra
+    build:
+      dockerfile: Dockerfile
+    instance_type: nano
+    ports:
+      - port: 8000
+        path: /
+    env:
+      - key: TELEGRAM_BOT_TOKEN
+        value: 8840394969:AAFXsybR9ihgyRqBKe00r8eeILxl-G1mwc4
+      - key: PORT
+        value: "8000"
