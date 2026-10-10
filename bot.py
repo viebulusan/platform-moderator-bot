@@ -23,9 +23,10 @@ import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Comprehensive regex to detect URLs, domain names, and invite links
+# Comprehensive regex to detect URLs, domain names, shorteners, and invite links
 LINK_REGEX = re.compile(
     r'(https?://[^\s]+)|'
+    r'(ftp://[^\s]+)|'
     r'(tg://[^\s]+)|'
     r'(t\.me/[^\s]+)|'
     r'(telegram\.me/[^\s]+)|'
@@ -35,7 +36,7 @@ LINK_REGEX = re.compile(
     r'(discord\.gg/[^\s]+)|'
     r'(discord\.com/invite/[^\s]+)|'
     r'(www\.[^\s]+)|'
-    r'(\b[a-zA-Z0-9-]+\.(?:com|org|net|io|me|xyz|ph|co|vip|app|site|top|cc|online|pro|info|live|shop|club|store|tech|fun|space|link|ai|gg|dev|biz|tv|edu|gov|us|uk|ru|ca|de|in)\b[^\s]*)',
+    r'(\b[a-zA-Z0-9-]+\.(?:com|org|net|io|me|xyz|ph|co|vip|app|site|top|cc|online|pro|info|live|shop|club|store|tech|fun|space|link|ai|gg|dev|biz|tv|edu|gov|us|uk|ru|ca|de|in|ly|to|ee|is|it|fr|nl|se|ch|es|win|icu|fit|loan|group|ltd|mobi|bid|work|zone|agency|network|media|digital|life|today|world|trade|click|cloud|run|page|lat|asia|bet|pub|center|money|finance|cash|fund)\b[^\s]*)',
     re.IGNORECASE
 )
 
@@ -81,7 +82,11 @@ class PlatformModeratorBot:
             "chat_id": chat_id,
             "message_id": message_id
         })
-        return res.get("ok", False)
+        if not res.get("ok"):
+            err_desc = res.get("description", "Unknown error")
+            log(f"⚠️ deleteMessage failed for chat {chat_id}, msg {message_id}: {err_desc}")
+            return False
+        return True
 
     def send_message(self, chat_id: int, text: str, parse_mode: str = "Markdown", disable_web_page_preview: bool = True) -> dict:
         return self.request("sendMessage", {
@@ -122,16 +127,28 @@ class PlatformModeratorBot:
         return False
 
     def message_contains_links(self, msg: dict) -> bool:
-        text = msg.get("text") or msg.get("caption") or ""
-
-        # 1. Check native Telegram message entities (explicit URLs or hidden text links)
-        entities = msg.get("entities") or msg.get("caption_entities") or []
-        for ent in entities:
+        # 1. Check native Telegram message entities in text
+        for ent in (msg.get("entities") or []):
             if ent.get("type") in ["url", "text_link"]:
                 return True
 
-        # 2. Check regex patterns across text or caption
-        if text and LINK_REGEX.search(text):
+        # 2. Check native entities in caption (photos, videos, docs, animations)
+        for ent in (msg.get("caption_entities") or []):
+            if ent.get("type") in ["url", "text_link"]:
+                return True
+
+        # 3. Check inline buttons (URL buttons or Web Apps)
+        reply_markup = msg.get("reply_markup") or {}
+        for row in (reply_markup.get("inline_keyboard") or []):
+            for btn in row:
+                if btn.get("url") or btn.get("web_app"):
+                    return True
+
+        # 4. Check regex patterns across text and caption
+        text = msg.get("text") or ""
+        caption = msg.get("caption") or ""
+        combined = f"{text} {caption}".strip()
+        if combined and LINK_REGEX.search(combined):
             return True
 
         return False
@@ -178,11 +195,14 @@ class PlatformModeratorBot:
         new_members = msg.get("new_chat_members") or []
         if "new_chat_participant" in msg and not new_members:
             new_members = [msg["new_chat_participant"]]
+        if "new_chat_member" in msg and not new_members:
+            new_members = [msg["new_chat_member"]]
 
-        if new_members:
+        is_join = bool(new_members) or ("new_chat_members" in msg) or ("new_chat_participant" in msg) or ("new_chat_member" in msg)
+        if is_join:
             # Delete join service message immediately
             deleted = self.delete_message(chat_id, message_id)
-            names = ", ".join([u.get("first_name", "User") for u in new_members])
+            names = ", ".join([u.get("first_name", "User") for u in new_members]) or "User"
             log(f"[CLEANUP] Deleted 'user joined' message (ID: {message_id}) for [{names}] in '{chat_title}' ({chat_id})")
 
             # Check if this bot was just invited to the group
@@ -206,7 +226,8 @@ class PlatformModeratorBot:
                         threading.Timer(30.0, cleanup_welcome).start()
             return
 
-        if "left_chat_member" in msg or "left_chat_participant" in msg:
+        is_leave = ("left_chat_member" in msg) or ("left_chat_participant" in msg)
+        if is_leave:
             deleted = self.delete_message(chat_id, message_id)
             left_user = msg.get("left_chat_member") or msg.get("left_chat_participant") or {}
             left_name = left_user.get("first_name", "User")
@@ -221,15 +242,25 @@ class PlatformModeratorBot:
         user_id = from_user.get("id")
         username = from_user.get("username") or from_user.get("first_name") or f"User-{user_id}"
 
-        # If sent as anonymous group admin or linked channel, exempt
-        is_sender_group_owner = sender_chat and (sender_chat.get("id") == chat_id)
-        is_sender_channel = bool(sender_chat)
-        is_admin = is_sender_group_owner or is_sender_channel or (user_id and self.is_user_admin(chat_id, user_id))
+        # Precise admin verification:
+        is_admin = False
+        if sender_chat and (sender_chat.get("id") == chat_id):
+            # Sent as anonymous group admin
+            is_admin = True
+        elif user_id in [ANONYMOUS_ADMIN_ID, TELEGRAM_SERVICE_ID]:
+            # Telegram system or anonymous bot
+            is_admin = True
+        elif user_id and self.is_user_admin(chat_id, user_id):
+            # User is group admin or creator
+            is_admin = True
+        elif sender_chat:
+            # Sent as a channel - check if the channel is recognized as admin
+            is_admin = self.is_user_admin(chat_id, sender_chat.get("id"))
 
-        # Admin helper command: /status, /ping, /guard
+        # Admin helper command: /start, /status, /ping, /guard
         text = (msg.get("text") or "").strip().lower()
         bot_suffix = f"@{self.bot_username.lower()}" if self.bot_username else ""
-        if is_admin and (text in ["/status", "/ping", "/guard", f"/status{bot_suffix}", f"/ping{bot_suffix}", f"/guard{bot_suffix}"]):
+        if is_admin and (text in ["/start", "/status", "/ping", "/guard", f"/start{bot_suffix}", f"/status{bot_suffix}", f"/ping{bot_suffix}", f"/guard{bot_suffix}"]):
             sent = self.send_message(
                 chat_id,
                 f"🛡️ *@{self.bot_username} Status in {chat_title}:*\n\n"
