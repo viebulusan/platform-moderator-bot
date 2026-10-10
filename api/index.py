@@ -4,8 +4,13 @@ import os
 import sys
 import urllib.parse
 
-# Add parent directory to path so bot module can be imported
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure both local and parent directories are in sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+for p in [current_dir, parent_dir]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 from bot import PlatformModeratorBot, load_token
 
 token = load_token()
